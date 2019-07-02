@@ -1,0 +1,152 @@
+From 9572d832c68b60777c157ad785fa7886204e257e Mon Sep 17 00:00:00 2001
+From: Daria Zahaleanu <daz261@nyu.edu>
+Date: Fri, 3 May 2019 23:41:58 +0000
+Subject: [PATCH 7/7] Implement lazy allocation
+
+---
+ Makefile  |    2 ++
+ defs.h    |    4 ++--
+ sanity.c  |   16 ++++++++++++++++
+ sysproc.c |    5 +++--
+ trap.c    |   16 +++++++++++++++-
+ vm.c      |   10 +++++++---
+ 6 files changed, 45 insertions(+), 8 deletions(-)
+ create mode 100644 sanity.c
+
+diff --git a/Makefile b/Makefile
+index b4fd9a2..39e070c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -172,6 +172,8 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_sanity\
++
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+diff --git a/defs.h b/defs.h
+index b47372b..1dac212 100644
+--- a/defs.h
++++ b/defs.h
+@@ -156,7 +156,7 @@ void            idtinit(void);
+ extern uint     ticks;
+ void            tvinit(void);
+ extern struct spinlock tickslock;
+-
++int             mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
+ // uart.c
+ void            uartinit(void);
+ void            uartintr(void);
+@@ -178,6 +178,6 @@ void            switchuvm(struct proc*);
+ void            switchkvm(void);
+ int             copyout(pde_t*, uint, void*, uint);
+ void            clearpteu(pde_t *pgdir, char *uva);
+-
++int 		mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
+ // number of elements in fixed-size array
+ #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+diff --git a/sanity.c b/sanity.c
+new file mode 100644
+index 0000000..d91b3a5
+--- /dev/null
++++ b/sanity.c
+@@ -0,0 +1,16 @@
++#include "types.h"
++#include "user.h"
++
++#define PGSIZE 4096
++
++int main (int argc, char **argv){
++	char *impl = sbrk(PGSIZE*10);
++	impl[3*PGSIZE] = 'A';
++	impl[0] = 'B';
++ //	cprintf ("%s", impl[0]);
++	fork();
++	exit();
++}
++
++//it should print 'zombie'
++
+diff --git a/sysproc.c b/sysproc.c
+index 027a5e5..827322e 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -51,8 +51,9 @@ sys_sbrk(void)
+   if(argint(0, &n) < 0)
+     return -1;
+   addr = proc->sz;
+-  if(growproc(n) < 0)
+-    return -1;
++ // if(growproc(n) < 0)
++  //  return -1;
++  proc->sz += n;
+   return addr;
+ }
+ 
+diff --git a/trap.c b/trap.c
+index 3f80145..18c7898 100644
+--- a/trap.c
++++ b/trap.c
+@@ -77,7 +77,21 @@ trap(struct trapframe *tf)
+             cpu->id, tf->cs, tf->eip);
+     lapiceoi();
+     break;
+-   
++
++//DEALING WITH THE PAGE FAULT CASE 
++  case T_PGFLT :{
++	char *mem = kalloc();
++	uint a = PGROUNDDOWN(rcr2());
++	if (mem ==0){
++		cprintf("trap out of memory\n");
++		proc->killed = 1;
++		break;
++	}
++	mappages (proc->pgdir, (char*)a, PGSIZE, v2p(mem), PTE_W|PTE_U);
++	memset(mem, 0, PGSIZE);
++	switchuvm(proc);
++	break;
++}
+   //PAGEBREAK: 13
+   default:
+     if(proc == 0 || (tf->cs&3) == 0){
+diff --git a/vm.c b/vm.c
+index 5326d14..75b5c92 100644
+--- a/vm.c
++++ b/vm.c
+@@ -67,7 +67,10 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc)
+ // Create PTEs for virtual addresses starting at va that refer to
+ // physical addresses starting at pa. va and size might not
+ // be page-aligned.
+-static int
++
++//CHANGING TO NON-STATIC
++//static int
++int
+ mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
+ {
+   char *a, *last;
+@@ -80,7 +83,7 @@ mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
+       return -1;
+     if(*pte & PTE_P)
+       panic("remap");
+-    *pte = pa | perm | PTE_P;
++     *pte = pa | perm | PTE_P;
+     if(a == last)
+       break;
+     a += PGSIZE;
+@@ -320,7 +323,8 @@ copyuvm(pde_t *pgdir, uint sz)
+     if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
+       panic("copyuvm: pte should exist");
+     if(!(*pte & PTE_P))
+-      panic("copyuvm: page not present");
++      //panic("copyuvm: page not present");
++       continue;
+     pa = PTE_ADDR(*pte);
+     flags = PTE_FLAGS(*pte);
+     if((mem = kalloc()) == 0)
+-- 
+1.7.9.5
+
